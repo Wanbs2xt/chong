@@ -5,6 +5,36 @@ from playwright.sync_api import Playwright, sync_playwright, expect
 import pandas as pd
 import urllib.parse
 import re
+from bpftUI import BaiduPanFilesTransfers
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment
+
+
+def set_excel_format(path):
+    wb = load_workbook(path)
+    ws = wb.active
+
+    # 设置行高，跳过首行
+    for i, row in enumerate(ws.iter_rows(), start=1):
+        if i > 1:  # 跳过首行
+            ws.row_dimensions[row[0].row].height = 187.2
+
+    # 设置列宽
+    ws.column_dimensions[get_column_letter(2)].width = 22.33  # 名称列宽，对应"B"列
+    ws.column_dimensions[get_column_letter(3)].width = 34.33  # 豆瓣名称列宽，对应"C"列
+    ws.column_dimensions[get_column_letter(5)].width = 82.56  # 豆瓣信息列宽，对应"E"列
+    ws.column_dimensions[get_column_letter(6)].width = 82.56  # 百度网盘分享外链列宽，对应"F"列
+    ws.column_dimensions[get_column_letter(9)].width = 82.56  # 百度链接列宽，对应"I"列
+
+    # 设置EFI列自动换行
+    alignment = Alignment(wrap_text=True)
+    for col in ['E', 'F', 'I']:
+        for cell in ws[col]:
+            cell.alignment = alignment
+
+    wb.save(path)
+
 
 def link_test(url):
     session = requests.Session()
@@ -17,6 +47,18 @@ def link_test(url):
     return text
 
 
+def save_to_baidu(classtype, total_title):
+    app = BaiduPanFilesTransfers()
+    app.entry_cookie.insert(0, 'cookie')
+    if classtype == '电影':
+        app.entry_folder_name.insert(0, total_title)
+    else:
+        app.create_dir(total_title)
+        app.entry_folder_name.insert(0, total_title)
+
+    app.text_links.insert(1.0, "你的链接")
+
+
 def search_movie(page, filename):
     url1 = 'http://m.kkkob.com/apps/index.html?id=211229kl'
     url2 = 'http://ysxjjkl.souyisou.top/'
@@ -25,7 +67,6 @@ def search_movie(page, filename):
     page.query_selector('#submitSearch').click()
     page.wait_for_load_state('networkidle')
     pageinfo1 = page.content()
-    time.sleep(15)
     page.goto(url2)
     page.query_selector('.input-wap #search').fill(filename)
     page.query_selector('#submitSearch').click()
@@ -33,19 +74,33 @@ def search_movie(page, filename):
     pageinfo2 = page.content()
     soup = BeautifulSoup(pageinfo1, 'html.parser')
     soup2 = BeautifulSoup(pageinfo2, 'html.parser')
-    baidu_link = [a['href'] for a in soup.select('.access-box .info a') if 'pan.baidu.com' in a['href']]
-    baidu_link2 = [a['href'] for a in soup2.select('.access-box .info a') if 'pan.baidu.com' in a['href']]
+    baidu_link = [
+        (a['href'].split('?')[0],
+         re.search(r'提取码：(\w+)', next_sibling.get_text()).group(1) if next_sibling and re.search(r'提取码：(\w+)',
+                                                                                                    next_sibling.get_text()) else None)
+        for a in soup.select('.access-box .info a') if
+        'pan.baidu.com' in a['href'] and (next_sibling := a.find_next_sibling('div'))
+    ]
+
+    baidu_link2 = [
+        (a['href'].split('?')[0],
+         re.search(r'提取码：(\w+)', next_sibling.get_text()).group(1) if next_sibling and re.search(r'提取码：(\w+)',
+                                                                                                    next_sibling.get_text()) else None)
+        for a in soup2.select('.access-box .info a') if
+        'pan.baidu.com' in a['href'] and (next_sibling := a.find_next_sibling('div'))
+    ]
     combined_links = list(set(baidu_link + baidu_link2))
     datastr = ''  # 初始化datastr
     if combined_links:
-        for link in combined_links:
+        for link, password in combined_links:
             try:
                 res = link_test(link)
                 if '提取码' in res or '下载' in res:
-                    datastr += link + '\n'  # 将符合条件的链接加入到datastr中
+                    datastr += link + (f'?pwd={password}' if password else '') + '\n'  # 将符合条件的链接加入到datastr中
             except:
                 continue
     return datastr.strip() if datastr else None
+
 
 def read_excel_file(path):
     df = pd.read_excel(path)
@@ -88,8 +143,8 @@ def get_movie_title_and_year(soup, file_name):
         except:
             year = ''
         total_title = totalname + year
-        return total_title,year
-    return None,None
+        return total_title, year
+    return None, None
 
 
 def get_movie_info(soup):
@@ -141,10 +196,12 @@ def update_excel_file(df, file_name, total_title, classtype, path, info_text, ba
 
 
 def run(playwright: Playwright) -> None:
-    df = read_excel_file(r"C:\Users\万秉森\Desktop\deyu.xlsx")
+    df = read_excel_file(path)
     with playwright.chromium.launch(headless=False) as browser:
         with browser.new_context() as context:
             page = context.new_page()
+            context.set_default_navigation_timeout(60000)  # 设置默认的导航超时时间为60秒
+            context.set_default_timeout(60000)
             b_column = df['名称']
             for file_name in b_column:
                 baidulink = search_movie(page, file_name)
@@ -158,12 +215,15 @@ def run(playwright: Playwright) -> None:
                 movie_link = get_movie_info_link(soup)
                 if movie_link:
                     soup = get_page_content(page, movie_link)
-                    total_title,year = get_movie_title_and_year(soup, file_name)
+                    total_title, year = get_movie_title_and_year(soup, file_name)
                     info_text = get_movie_info(soup)
                     if total_title and year:
                         update_excel_file(df, file_name, total_title, classtype,
-                                          r"C:\Users\万秉森\Desktop\deyu.xlsx", info_text, baidulink)
+                                          path, info_text, baidulink)
+                        set_excel_format(path)
+            set_excel_format(path)
 
 
 with sync_playwright() as playwright:
+    path = r"文件路径"
     run(playwright)
