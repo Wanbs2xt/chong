@@ -10,6 +10,13 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 
+def value(soup):
+    listvalue = [
+        (a['href'].split('?')[0],a.next_sibling.split("：")[-1].strip())
+        for a in soup.select('.access-box .info a') if
+        'pan.baidu.com' in a['href']
+    ]
+    return listvalue
 
 def set_excel_format(path):
     wb = load_workbook(path)
@@ -35,7 +42,6 @@ def set_excel_format(path):
 
     wb.save(path)
 
-
 def link_test(url):
     session = requests.Session()
     head = {
@@ -45,7 +51,6 @@ def link_test(url):
     soup = BeautifulSoup(res.text, 'html.parser')
     text = str(soup.title)
     return text
-
 
 def save_to_baidu(classtype, total_title):
     app = BaiduPanFilesTransfers()
@@ -58,54 +63,39 @@ def save_to_baidu(classtype, total_title):
 
     app.text_links.insert(1.0, "你的链接")
 
+def search_and_get_baidulink(page, url, filename):
+    page.goto(url)
+    page.query_selector('.input-wap #search').fill(filename)
+    page.query_selector('#submitSearch').click()
+    page.wait_for_load_state('networkidle')
+    return BeautifulSoup(page.content(), 'html.parser')
 
 def search_movie(page, filename):
     url1 = 'http://m.kkkob.com/apps/index.html?id=211229kl'
     url2 = 'http://ysxjjkl.souyisou.top/'
-    page.goto(url1)
-    page.query_selector('.input-wap #search').fill(filename)
-    page.query_selector('#submitSearch').click()
-    page.wait_for_load_state('networkidle')
-    pageinfo1 = page.content()
-    page.goto(url2)
-    page.query_selector('.input-wap #search').fill(filename)
-    page.query_selector('#submitSearch').click()
-    page.wait_for_load_state('networkidle')
-    pageinfo2 = page.content()
-    soup = BeautifulSoup(pageinfo1, 'html.parser')
-    soup2 = BeautifulSoup(pageinfo2, 'html.parser')
-    baidu_link = [
-        (a['href'].split('?')[0],
-         re.search(r'提取码：(\w+)', next_sibling.get_text()).group(1) if next_sibling and re.search(r'提取码：(\w+)',
-                                                                                                    next_sibling.get_text()) else None)
-        for a in soup.select('.access-box .info a') if
-        'pan.baidu.com' in a['href'] and (next_sibling := a.find_next_sibling('div'))
-    ]
-
-    baidu_link2 = [
-        (a['href'].split('?')[0],
-         re.search(r'提取码：(\w+)', next_sibling.get_text()).group(1) if next_sibling and re.search(r'提取码：(\w+)',
-                                                                                                    next_sibling.get_text()) else None)
-        for a in soup2.select('.access-box .info a') if
-        'pan.baidu.com' in a['href'] and (next_sibling := a.find_next_sibling('div'))
-    ]
-    combined_links = list(set(baidu_link + baidu_link2))
+    soup1 = search_and_get_baidulink(page, url1, filename)
+    #time.sleep(2)
+    soup2 = search_and_get_baidulink(page, url2, filename)
+    baidu_link1 = value(soup1)
+    baidu_link2 = value(soup2)
+    combined_links = list(set(baidu_link1 + baidu_link2))
     datastr = ''  # 初始化datastr
     if combined_links:
         for link, password in combined_links:
             try:
                 res = link_test(link)
                 if '提取码' in res or '下载' in res:
-                    datastr += link + (f'?pwd={password}' if password else '') + '\n'  # 将符合条件的链接加入到datastr中
+                    if re.search('[\u4e00-\u9fff]', password):  # 如果密码包含中文字符
+                        datastr += link + '\n'
+                    else:
+                        datastr += link + (f'?pwd={password}' if password else '') + '\n'  # 将符合条件的链接加入到datastr中
             except:
                 continue
     return datastr.strip() if datastr else None
 
-
 def read_excel_file(path):
     df = pd.read_excel(path)
     return df
-
 
 def get_page_content(page, url):
     page.goto(url)
@@ -113,17 +103,17 @@ def get_page_content(page, url):
     return soup
 
 
-def get_movie_type(soup):
-    class_type = None
-    elements = soup.select('.result .title span')
-    if elements:
-        element = elements[0].text
-        if element:
-            class_type = element.strip('[]')
-            if class_type not in ('电影', '电视剧'):
-                class_type = '电视剧'
+def get_movie_type(info):
+    class_type = '电影'  # 默认为电影
+    if '动画' in info:
+        class_type = '动画'
+    elif '真人秀' in info or '脱口秀' in info:
+        class_type = '综艺'
+    elif '纪录片' in info:
+        class_type = '纪录片'
+    elif '集数' in info:
+        class_type = '电视剧'
     return class_type
-
 
 def get_movie_info_link(soup):
     href_links = [a['href'] for a in soup.select('.sc-bZQynM a')]
@@ -183,7 +173,8 @@ def get_movie_info(soup):
             elif child.name == 'a':
                 link_text = child.text.strip()
                 movie_info += f"{link_text}"
-    return movie_info
+    classtype = get_movie_type(movie_info)
+    return movie_info,classtype
 
 
 def update_excel_file(df, file_name, total_title, classtype, path, info_text, baidulink):
@@ -200,8 +191,8 @@ def run(playwright: Playwright) -> None:
     with playwright.chromium.launch(headless=False) as browser:
         with browser.new_context() as context:
             page = context.new_page()
-            context.set_default_navigation_timeout(60000)  # 设置默认的导航超时时间为60秒
-            context.set_default_timeout(60000)
+            context.set_default_navigation_timeout(300000)  # 设置默认的导航超时时间为60秒
+            context.set_default_timeout(300000)
             b_column = df['名称']
             for file_name in b_column:
                 baidulink = search_movie(page, file_name)
@@ -209,14 +200,13 @@ def run(playwright: Playwright) -> None:
                     continue
                 encoded_string = urllib.parse.quote(file_name)
                 soup = get_page_content(page, f'https://www.douban.com/search?q={encoded_string}')
-                classtype = get_movie_type(soup)
                 soup = get_page_content(page,
                                         f'https://search.douban.com/movie/subject_search?search_text={encoded_string}&cat=1002')
                 movie_link = get_movie_info_link(soup)
                 if movie_link:
                     soup = get_page_content(page, movie_link)
                     total_title, year = get_movie_title_and_year(soup, file_name)
-                    info_text = get_movie_info(soup)
+                    info_text,classtype = get_movie_info(soup)
                     if total_title and year:
                         update_excel_file(df, file_name, total_title, classtype,
                                           path, info_text, baidulink)
